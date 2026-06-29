@@ -11,8 +11,10 @@ echo ""
 # Step 1: Our info
 MY_IP=$(ifconfig en0 | grep 'inet ' | awk '{print $2}')
 MY_MAC=$(ifconfig en0 | grep ether | awk '{print $2}')
+GW_IP=$(netstat -rn -f inet | grep default | awk '{print $2}')
 echo "  My IP: $MY_IP"
 echo "  My MAC: $MY_MAC"
+echo "  Gateway: $GW_IP"
 echo ""
 
 # Step 2: Probe network (silent)
@@ -24,9 +26,9 @@ echo ""
 # Step 3: Get live devices from ARP (only entries with real MAC, not incomplete)
 echo "  Network Devices Found:"
 echo ""
-echo "  +-----+-----------------+-------------------+----------------------+------------------+"
-printf "  | %-3s | %-15s | %-17s | %-20s | %-16s |\n" "No." "IP Address" "MAC Address" "Device Type" "Open Ports"
-echo "  +-----+-----------------+-------------------+----------------------+------------------+"
+  echo "  +-----+-----------------+-------------------+--------------------------------------+------------------+"
+  printf "  | %-3s | %-15s | %-17s | %-36s | %-16s |\n" "No." "IP Address" "MAC Address" "Device Type" "Open Ports"
+  echo "  +-----+-----------------+-------------------+--------------------------------------+------------------+"
 
 count=1
 while IFS= read -r line; do
@@ -42,16 +44,35 @@ while IFS= read -r line; do
   # Pad MAC to full 17 chars (macOS shortens leading zeros)
   mac=$(echo "$mac" | awk -F: '{for(i=1;i<=NF;i++) printf "%02s%s", $i, (i<NF?":":"\n")}' | tr ' ' '0')
 
-  # Guess device type from MAC
-  mac_prefix=$(echo "$mac" | cut -c1-8 | tr '[:upper:]' '[:lower:]')
-  case "$mac_prefix" in
-    90:55:de) type="Router (Fiberhome)"   ;;
-    08:cc:81) type="IP Camera (Hikvision)" ;;
-    34:2e:b7) type="PC (Intel)"           ;;
-    32:e5:ca) type="iPad 5"               ;;
-    c0:b0:d1) type="MacBook Pro (เรา)"    ;;
-    *)        type="Unknown Device"       ;;
-  esac
+  # Lookup vendor from OUI (downloads IEEE list once, caches to ~/.cache/)
+  OUI_CACHE="$HOME/.cache/oui.txt"
+  if [ ! -f "$OUI_CACHE" ]; then
+    mkdir -p "$HOME/.cache"
+    curl -sL --max-time 120 -o "$OUI_CACHE" "https://standards-oui.ieee.org/oui/oui.txt"
+  fi
+  oui_prefix=$(echo "$mac" | cut -c1-8 | tr ':' '-' | tr '[:lower:]' '[:upper:]')
+  vendor=$(grep -i "^$oui_prefix" "$OUI_CACHE" | sed 's/.*(hex)[[:space:]]*//' | head -1 | tr -d '\r')
+  if [ -z "$vendor" ]; then
+    byte=$(echo "$mac" | cut -d: -f1)
+    if [ $((16#$byte & 2)) -eq 2 ]; then
+      vendor="Private / Randomized MAC"
+    else
+      vendor="Unknown Device"
+    fi
+  fi
+  # Try to resolve hostname for unknown/private devices
+  hostname=""
+  if [ "$vendor" = "Private / Randomized MAC" ] || [ "$vendor" = "Unknown Device" ]; then
+    hostname=$(nslookup "$ip" 2>/dev/null | awk '/name =/ {print $NF}' | sed 's/\.$//')
+    [ -z "$hostname" ] && hostname=$(dscacheutil -q host -a ip_address "$ip" 2>/dev/null | grep 'name:' | awk '{print $2}')
+  fi
+
+  # Build type string (truncate vendor first so markers fit)
+  type="$vendor"
+  [ -n "$hostname" ] && type="$hostname"
+  type=$(echo "$type" | sed 's/  */ /g' | cut -c1-28 | sed 's/ *$//')
+  [ "$ip" = "$GW_IP" ] && type="$type (GW)"
+  [ "$ip" = "$MY_IP" ] && type="$type (เรา)"
 
   # Port scan (skip our own IP)
   if [ "$ip" = "$MY_IP" ]; then
@@ -61,10 +82,10 @@ while IFS= read -r line; do
   fi
   [ -z "$ports" ] && ports="-"
 
-  printf "  | %-3s | %-15s | %-17s | %-20s | %-16s |\n" "$count" "$ip" "$mac" "$type" "$ports"
+  printf "  | %-3s | %-15s | %-17s | %-36s | %-16s |\n" "$count" "$ip" "$mac" "$type" "$ports"
   count=$((count+1))
 done < <(arp -a)
 
-echo "  +-----+-----------------+-------------------+----------------------+------------------+"
+echo "  +-----+-----------------+-------------------+--------------------------------------+------------------+"
 echo "  Total: $((count-1)) device(s) in LAN (including ours)"
 echo ""
