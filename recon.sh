@@ -3,38 +3,68 @@
 # Usage: bash recon.sh
 
 clear
-echo "====================================="
-echo "  Bonus 2: Network Reconnaissance"
-echo "====================================="
+echo "  +------------------------------------------+"
+echo "  |   Bonus 2: Network Reconnaissance        |"
+echo "  +------------------------------------------+"
 echo ""
 
-# Step 1 - Our IP/MAC
-echo "=== Step 1: Our Network Info ==="
-echo "IP:    $(ifconfig en0 | grep 'inet ' | awk '{print $2}')"
-echo "MAC:   $(ifconfig en0 | grep ether | awk '{print $2}')"
+# Step 1: Our info
+MY_IP=$(ifconfig en0 | grep 'inet ' | awk '{print $2}')
+MY_MAC=$(ifconfig en0 | grep ether | awk '{print $2}')
+echo "  My IP: $MY_IP"
+echo "  My MAC: $MY_MAC"
 echo ""
 
-# Step 2 - BetterCAP scan
-echo "=== Step 2: Scanning LAN with BetterCAP ==="
-bettercap -eval "net.probe on; sleep 5; net.show; quit" 2>/dev/null
+# Step 2: Probe network (silent)
+echo "  Probing LAN with BetterCAP..."
+bettercap -eval "net.probe on; sleep 5; quit" 2>/dev/null >/dev/null
+echo "  Done."
 echo ""
 
-# Step 3 - Port scan only discovered devices (skip our IP)
-echo "=== Step 3: Port Scan Discovered Devices ==="
+# Step 3: Get live devices from ARP (only entries with real MAC, not incomplete)
+echo "  Network Devices Found:"
 echo ""
+echo "  +-----+-----------------+-------------------+----------------------+------------------+"
+printf "  | %-3s | %-15s | %-17s | %-20s | %-16s |\n" "No." "IP Address" "MAC Address" "Device Type" "Open Ports"
+echo "  +-----+-----------------+-------------------+----------------------+------------------+"
 
-# Specific IPs found by BetterCAP in this LAN
-TARGETS="192.168.1.1 192.168.1.2 192.168.1.6 192.168.1.10 192.168.1.11 192.168.1.13 192.168.1.16 192.168.1.18 192.168.1.43"
+count=1
+while IFS= read -r line; do
+  # Extract IP
+  ip=$(echo "$line" | sed -n 's/.*(\([0-9.]*\)).*/\1/p')
+  # Extract MAC (skip if incomplete)
+  mac=$(echo "$line" | grep -oE 'at [0-9a-fA-F:]{7,17}' | awk '{print $2}')
+  # Skip broadcast and multicast
+  [ "$mac" = "ff:ff:ff:ff:ff:ff" ] && continue
+  [[ "$mac" == 1:0:5e:* ]] && continue
+  [ -z "$mac" ] && continue
 
-for ip in $TARGETS; do
-  echo ">> $ip"
-  PORTS=$(nmap -F $ip 2>/dev/null | grep "open" | awk '{print $1, $3}' | tr '\n' ', ')
-  if [ -z "$PORTS" ]; then
-    echo "   No open ports"
+  # Pad MAC to full 17 chars (macOS shortens leading zeros)
+  mac=$(echo "$mac" | awk -F: '{for(i=1;i<=NF;i++) printf "%02s%s", $i, (i<NF?":":"\n")}' | tr ' ' '0')
+
+  # Guess device type from MAC
+  mac_prefix=$(echo "$mac" | cut -c1-8 | tr '[:upper:]' '[:lower:]')
+  case "$mac_prefix" in
+    90:55:de) type="Router (Fiberhome)"   ;;
+    08:cc:81) type="IP Camera (Hikvision)" ;;
+    34:2e:b7) type="PC (Intel)"           ;;
+    32:e5:ca) type="iPad 5"               ;;
+    c0:b0:d1) type="MacBook Pro (เรา)"    ;;
+    *)        type="Unknown Device"       ;;
+  esac
+
+  # Port scan (skip our own IP)
+  if [ "$ip" = "$MY_IP" ]; then
+    ports="-"
   else
-    echo "   Ports: $PORTS"
+    ports=$(nmap -F "$ip" 2>/dev/null | awk '/open/ {printf "%s ", $1}' | sed 's/\/tcp//g')
   fi
-  echo ""
-done
+  [ -z "$ports" ] && ports="-"
 
-echo "=== DONE ==="
+  printf "  | %-3s | %-15s | %-17s | %-20s | %-16s |\n" "$count" "$ip" "$mac" "$type" "$ports"
+  count=$((count+1))
+done < <(arp -a)
+
+echo "  +-----+-----------------+-------------------+----------------------+------------------+"
+echo "  Total: $((count-1)) device(s) in LAN (including ours)"
+echo ""
